@@ -1,0 +1,22 @@
+ISL Emergency Gesture Recognition - Independent Test Set Evaluation
+=================================================================
+
+Overall Accuracy: 93.44%
+Weighted Precision: 0.9417
+Weighted Recall: 0.9344
+Weighted F1-Score: 0.9348
+
+              precision    recall  f1-score   support
+
+    accident     1.0000    0.9375    0.9677        16
+        call     0.9333    0.9333    0.9333        15
+      doctor     0.9286    0.8667    0.8966        15
+        help     0.8824    0.9375    0.9091        16
+         hot     1.0000    0.8000    0.8889        15
+        lose     1.0000    1.0000    1.0000        15
+        pain     0.7895    1.0000    0.8824        15
+       thief     1.0000    1.0000    1.0000        15
+
+    accuracy                         0.9344       122
+   macro avg     0.9417    0.9344    0.9347       122
+weighted avg     0.9417    0.9344    0.9348       122
