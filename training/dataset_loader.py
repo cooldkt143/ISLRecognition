@@ -1,6 +1,7 @@
 """
 Dataset Loader for ISL Emergency Gesture Recognition.
-Inspects, validates, loads, and splits preprocessed (30, 126) NumPy sequences.
+Inspects, validates, loads, generates unknown gesture negative samples,
+and performs stratified splitting of (30, 126) NumPy landmark sequences.
 """
 
 import os
@@ -24,20 +25,107 @@ def discover_classes(data_dir: Path) -> list:
     if not data_dir.is_dir():
         raise FileNotFoundError(f"Data directory not found at: {data_dir.resolve()}")
 
-    subdirs = sorted([d.name for d in data_dir.iterdir() if d.is_dir()])
+    subdirs = sorted([d.name for d in data_dir.iterdir() if d.is_dir() and not d.name.startswith(".")])
     if not subdirs:
         raise ValueError(f"No class folders found in {data_dir.resolve()}")
 
     return subdirs
 
 
+def generate_negative_samples(n_samples: int = 160, random_state: int = 42) -> np.ndarray:
+    """
+    Generates diverse, anatomically realistic negative sequences (30 frames, 126 features)
+    representing gestures that do NOT belong to any of the 8 emergency signs:
+    1. Resting / Idle hands (palms on desk/lap, hands hanging, natural resting pose with tremor)
+    2. Conversational hand gestures (waving hello, circular swaying)
+    3. Static non-ISL hand poses (pointing with index, thumbs-up, open palm stop, fists)
+    4. Erratic / uncorrelated random hand movements (rubbing, scratching, face touching)
+    5. Asymmetric single-hand non-emergency motions
+    All sequences are anchored relative to active wrist identically to training data.
+    """
+    np.random.seed(random_state)
+    samples = []
+
+    # Standard human hand 21-point anatomical skeleton offsets
+    base_palm = np.array([
+        [0.00,  0.00, 0.0],   # 0: wrist
+        [-0.04, -0.03, 0.0], [-0.07, -0.06, 0.0], [-0.09, -0.09, 0.0], [-0.11, -0.12, 0.0], # 1-4: thumb
+        [-0.03, -0.10, 0.0], [-0.03, -0.15, 0.0], [-0.03, -0.19, 0.0], [-0.03, -0.22, 0.0], # 5-8: index
+        [0.00,  -0.11, 0.0], [0.00,  -0.16, 0.0], [0.00,  -0.21, 0.0], [0.00,  -0.24, 0.0], # 9-12: middle
+        [0.03,  -0.10, 0.0], [0.03,  -0.15, 0.0], [0.03,  -0.19, 0.0], [0.03,  -0.22, 0.0], # 13-16: ring
+        [0.06,  -0.08, 0.0], [0.06,  -0.12, 0.0], [0.06,  -0.15, 0.0], [0.06,  -0.18, 0.0]  # 17-20: pinky
+    ], dtype=np.float32)
+
+    for i in range(n_samples):
+        seq = np.zeros((30, 126), dtype=np.float32)
+        scenario = i % 5
+
+        scale_r = np.random.uniform(0.85, 1.15)
+        scale_l = np.random.uniform(0.85, 1.15)
+        r_hand = base_palm * scale_r
+        l_hand = base_palm.copy() * scale_l
+        l_hand[:, 0] = -l_hand[:, 0]  # Mirror X for Left hand
+
+        # Left wrist displacement relative to right wrist
+        lw_disp = np.array([np.random.uniform(-0.55, -0.15), np.random.uniform(-0.15, 0.20), np.random.uniform(-0.05, 0.05)])
+
+        for t in range(30):
+            if scenario == 0:  # Idle / resting hands
+                jr = np.random.normal(0, 0.002, (21, 3))
+                jl = np.random.normal(0, 0.002, (21, 3))
+                seq[t, 63:] = (r_hand + jr).flatten()
+                seq[t, :63] = (l_hand + lw_disp + jl).flatten()
+            elif scenario == 1:  # Waving hello / circular hand motion
+                wave = np.array([np.sin(t / 4.0) * 0.16, np.cos(t / 5.0) * 0.06, 0.0])
+                seq[t, 63:] = (r_hand + wave).flatten()
+                seq[t, :63] = (l_hand + lw_disp - wave * 0.25).flatten()
+            elif scenario == 2:  # Pointing / Thumbs up / Static pose with single hand
+                shift = np.array([np.sin(t / 8.0) * 0.04, np.cos(t / 8.0) * 0.04, 0.0])
+                seq[t, 63:] = (r_hand + shift).flatten()
+                # Left hand absent
+            elif scenario == 3:  # Rubbing / Scratching / Random path
+                walk_r = np.cumsum(np.random.normal(0, 0.012, (30, 21, 3)), axis=0)
+                walk_l = np.cumsum(np.random.normal(0, 0.012, (30, 21, 3)), axis=0)
+                seq[:, 63:] = (r_hand + walk_r).reshape(30, 63)
+                seq[:, :63] = (l_hand + lw_disp + walk_l).reshape(30, 63)
+                break
+            elif scenario == 4:  # Asymmetric single left hand moving
+                shift_l = np.array([-np.sin(t / 5.0) * 0.12, np.cos(t / 6.0) * 0.06, 0.0])
+                seq[t, :63] = (l_hand + lw_disp + shift_l).flatten()
+                # Right hand absent
+
+        # Anchor normalization: only normalize present hands (keep missing hands strictly 0.0)
+        for t in range(30):
+            frame = seq[t]
+            has_l = np.any(frame[:63] != 0)
+            has_r = np.any(frame[63:] != 0)
+            if has_r:
+                anchor = frame[63:66].copy()
+            elif has_l:
+                anchor = frame[0:3].copy()
+            else:
+                continue
+            if has_l:
+                for j in range(0, 63, 3):
+                    frame[j:j+3] -= anchor
+            if has_r:
+                for j in range(63, 126, 3):
+                    frame[j:j+3] -= anchor
+
+        samples.append(seq)
+    return np.array(samples, dtype=np.float32)
+
+
 def load_dataset(
     data_dir: Path = None,
     expected_shape: tuple = EXPECTED_SHAPE,
+    include_unknown: bool = True,
+    unknown_samples_count: int = 160,
     verbose: bool = True
 ):
     """
     Loads all .npy sequences from the class subdirectories in data_dir.
+    Optionally includes negative samples for an explicit 'unknown' rejection class.
 
     Returns:
         X (np.ndarray): Shape (N, 30, 126) float32 features.
@@ -49,7 +137,13 @@ def load_dataset(
     if data_dir is None:
         data_dir = get_project_root() / "data"
 
-    class_names = discover_classes(data_dir)
+    base_classes = discover_classes(data_dir)
+    # Ensure standard order for known classes
+    class_names = [c for c in DEFAULT_WORDS if c in base_classes] + [c for c in base_classes if c not in DEFAULT_WORDS]
+
+    if include_unknown and "unknown" not in class_names:
+        class_names.append("unknown")
+
     label2id = {name: idx for idx, name in enumerate(class_names)}
     id2label = {str(idx): name for idx, name in enumerate(class_names)}
     label_map = {"label2id": label2id, "id2label": id2label}
@@ -69,7 +163,10 @@ def load_dataset(
         print(f"Expected shape   : {expected_shape} (30 frames x 126 landmarks)")
         print("-" * 65)
 
+    # 1. Load existing valid 8 class directories
     for class_name in class_names:
+        if class_name == "unknown":
+            continue
         class_folder = data_dir / class_name
         npy_files = sorted(class_folder.glob("*.npy"))
         valid_in_class = 0
@@ -102,6 +199,18 @@ def load_dataset(
 
         if verbose:
             print(f"  Class '{class_name:10s}': {valid_in_class:3d} valid sequences loaded")
+
+    # 2. Add realistic negative samples for 'unknown' class if enabled
+    if include_unknown:
+        neg_samples = generate_negative_samples(n_samples=unknown_samples_count, random_state=42)
+        unknown_label = label2id["unknown"]
+        for idx, neg_seq in enumerate(neg_samples):
+            sequences.append(neg_seq)
+            labels.append(unknown_label)
+            file_paths.append(f"<synthetic_unknown_{idx}>")
+            class_counts["unknown"] += 1
+        if verbose:
+            print(f"  Class '{'unknown':10s}': {len(neg_samples):3d} negative samples generated (Idle, Random, Non-Sign)")
 
     if not sequences:
         raise ValueError(f"No valid sequences found in {data_dir.resolve()}")
@@ -192,6 +301,6 @@ if __name__ == "__main__":
     data_directory = root / "data"
     models_directory = root / "models"
 
-    X, y, classes, label_mapping, paths = load_dataset(data_directory, verbose=True)
+    X, y, classes, label_mapping, paths = load_dataset(data_directory, include_unknown=True, verbose=True)
     splits = split_dataset(X, y, verbose=True)
     save_label_mapping(label_mapping, models_directory / "label_map.json")

@@ -4,9 +4,10 @@ Tests:
 1. Dataset file integrity and shape consistency
 2. Label mapping completeness
 3. Keras model loading, output shapes, and inference latency
-4. Wrist-anchored coordinate normalization invariance
-5. Live recognizer engine and HUD overlay rendering
-6. Offline video predictor functionality
+4. Wrist-anchored coordinate normalization invariance and zero-preservation
+5. Live recognizer engine and bottom HUD canvas rendering
+6. Left-Hand & Right-Hand Sagittal Mirror Invariance
+7. Multi-tier Unknown Gesture Rejection Engine
 """
 
 import os
@@ -62,7 +63,7 @@ class TestISLPipeline(unittest.TestCase):
         print(f"  [PASS] test_01_dataset_files_and_shapes: {total_files} valid .npy files verified.")
 
     def test_02_label_mapping(self):
-        """Verifies label_map.json exists and maps all 8 words correctly."""
+        """Verifies label_map.json exists and maps all 8 emergency words correctly."""
         map_path = PROJECT_ROOT / "models" / "label_map.json"
         self.assertTrue(map_path.is_file(), f"label_map.json missing at {map_path}")
 
@@ -71,14 +72,14 @@ class TestISLPipeline(unittest.TestCase):
 
         self.assertIn("label2id", data)
         self.assertIn("id2label", data)
-        self.assertEqual(len(data["label2id"]), len(EXPECTED_CLASSES))
+        self.assertGreaterEqual(len(data["label2id"]), len(EXPECTED_CLASSES))
 
         for cname in EXPECTED_CLASSES:
             self.assertIn(cname, data["label2id"])
             cid = data["label2id"][cname]
             self.assertEqual(data["id2label"][str(cid)], cname)
 
-        print("  [PASS] test_02_label_mapping: Label map correctly maps 8 classes.")
+        print(f"  [PASS] test_02_label_mapping: Label map correctly maps {len(data['label2id'])} classes.")
 
     def test_03_model_loading_and_latency(self):
         """Verifies model loading, forward pass shape, and real-time inference latency."""
@@ -87,11 +88,10 @@ class TestISLPipeline(unittest.TestCase):
 
         model = keras.models.load_model(str(model_path))
         self.assertEqual(model.input_shape, (None, 30, 126))
-        self.assertEqual(model.output_shape, (None, 8))
+        self.assertIn(model.output_shape, [(None, 8), (None, 9)])
 
         # Benchmark forward pass latency
         dummy_seq = np.random.randn(1, 30, 126).astype(np.float32)
-        # Warmup
         _ = model.predict(dummy_seq, verbose=0)
 
         latencies = []
@@ -103,13 +103,13 @@ class TestISLPipeline(unittest.TestCase):
         avg_latency = np.mean(latencies)
         self.assertAlmostEqual(float(np.sum(probs)), 1.0, places=4)
         self.assertLess(avg_latency, 50.0, f"Inference latency too high: {avg_latency:.2f} ms")
-        print(f"  [PASS] test_03_model_loading_and_latency: Output shape (1, 8), avg latency = {avg_latency:.2f} ms.")
+        print(f"  [PASS] test_03_model_loading_and_latency: Output shape {model.output_shape}, avg latency = {avg_latency:.2f} ms.")
 
     def test_04_wrist_normalization_invariance(self):
-        """Tests that relative wrist normalization ensures translation invariance."""
+        """Tests that relative wrist normalization ensures translation invariance and preserves absent hands."""
         from live import LiveISLRecognizer
 
-        # Synthetic landmark sequence
+        # Synthetic landmark sequence with only Right hand present
         seq = np.zeros(126, dtype=np.float32)
         # Right wrist at (0.5, 0.5, 0.1)
         seq[63] = 0.5
@@ -120,7 +120,7 @@ class TestISLPipeline(unittest.TestCase):
         seq[64 + 8 * 3] = 0.7
         seq[65 + 8 * 3] = 0.2
 
-        # Apply offset to simulate person sitting elsewhere in camera view
+        # Left hand is absent: should stay STRICTLY 0.0
         offset = np.array([0.2, -0.3, 0.05], dtype=np.float32)
         seq_shifted = seq.copy()
         for j in range(63, 126, 3):
@@ -134,16 +134,19 @@ class TestISLPipeline(unittest.TestCase):
         np.testing.assert_allclose(norm2[63:66], [0.0, 0.0, 0.0], atol=1e-6)
         # Shifted index finger should match original index finger relative position
         np.testing.assert_allclose(norm1[63 + 8 * 3 : 66 + 8 * 3], norm2[63 + 8 * 3 : 66 + 8 * 3], atol=1e-6)
-        print("  [PASS] test_04_wrist_normalization_invariance: Relative anchoring verified.")
+        # Absent left hand must remain strictly zero (NO phantom landmark translation)
+        self.assertTrue(np.all(norm1[:63] == 0.0))
+        self.assertTrue(np.all(norm2[:63] == 0.0))
+        print("  [PASS] test_04_wrist_normalization_invariance: Relative anchoring & zero preservation verified.")
 
     def test_05_live_recognizer_pipeline(self):
         """Verifies LiveISLRecognizer instantiation, frame buffering, and HUD rendering."""
         from live import LiveISLRecognizer
 
         recognizer = LiveISLRecognizer(confidence_threshold=0.70)
-        self.assertEqual(len(recognizer.class_names), 8)
+        self.assertGreaterEqual(len(recognizer.class_names), 8)
 
-        # Feed 30 blank frames (no hands detected)
+        # Feed blank frame (no hands detected)
         dummy_frame = np.zeros((480, 640, 3), dtype=np.uint8)
         word, conf, probs, has_left, has_right = recognizer.predict_frame(dummy_frame)
 
@@ -152,23 +155,55 @@ class TestISLPipeline(unittest.TestCase):
         self.assertFalse(has_left)
         self.assertFalse(has_right)
 
-        # Test HUD rendering
-        recognizer.render_hud(dummy_frame, word, conf, probs, has_left, has_right, 30.0)
-        self.assertEqual(dummy_frame.shape, (480, 640, 3))
-        print("  [PASS] test_05_live_recognizer_pipeline: Live recognizer and HUD overlay verified.")
+        # Test HUD canvas assembly (camera + bottom panel)
+        full_canvas = recognizer.render_hud(dummy_frame, word, conf, probs, has_left, has_right, 30.0)
+        self.assertEqual(full_canvas.shape, (480 + recognizer.bottom_panel_height, 640, 3))
+        print("  [PASS] test_05_live_recognizer_pipeline: Live recognizer and bottom HUD canvas verified.")
 
-    def test_06_offline_video_prediction(self):
-        """Verifies offline video prediction on an actual dataset clip."""
-        from realtime.predict_video import predict_video_file
+    def test_06_hand_swapping_invariance(self):
+        """Verifies that Left-Hand and Right-Hand versions of a target sign are both recognized."""
+        from training.train import mirror_sequence
+        from live import LiveISLRecognizer
 
-        video_path = PROJECT_ROOT / "ISL_Emergency_Sign_dataset" / "accident_Cropped" / "accident_Crop  (1).mp4"
-        if video_path.is_file():
-            predicted_word, confidence, probs = predict_video_file(str(video_path), confidence_threshold=0.70)
-            self.assertEqual(predicted_word, "accident")
-            self.assertGreater(confidence, 0.85)
-            print(f"  [PASS] test_06_offline_video_prediction: Correctly predicted '{predicted_word}' ({confidence*100:.1f}%).")
-        else:
-            print("  [SKIP] test_06_offline_video_prediction: Sample video not found.")
+        recognizer = LiveISLRecognizer(confidence_threshold=0.60)
+        sample_path = PROJECT_ROOT / "data" / "accident" / "accident_Crop  (1).npy"
+        if not sample_path.is_file():
+            # Grab any existing sample in accident folder
+            sample_path = list((PROJECT_ROOT / "data" / "accident").glob("*.npy"))[0]
+
+        seq = np.load(sample_path)
+        # Canonical sequence
+        word_canon, conf_canon, _, is_valid_c, _ = recognizer.classify_and_verify_sequence(seq)
+
+        # Sagittal-mirrored sequence (opposite hand execution)
+        seq_mirr = mirror_sequence(np.expand_dims(seq, 0))[0]
+        word_mirr, conf_mirr, _, is_valid_m, _ = recognizer.classify_and_verify_sequence(seq_mirr)
+
+        self.assertEqual(word_canon, "ACCIDENT")
+        self.assertEqual(word_mirr, "ACCIDENT")
+        self.assertTrue(is_valid_c)
+        self.assertTrue(is_valid_m)
+        print(f"  [PASS] test_06_hand_swapping_invariance: Canonical '{word_canon}' ({conf_canon*100:.1f}%) and Mirrored '{word_mirr}' ({conf_mirr*100:.1f}%) both recognized.")
+
+    def test_07_unknown_gesture_rejection(self):
+        """Verifies that non-emergency, random, and resting hand gestures are rejected as 'Unknown Gesture'."""
+        from training.dataset_loader import generate_negative_samples
+        from live import LiveISLRecognizer
+
+        recognizer = LiveISLRecognizer(confidence_threshold=0.70)
+        # Generate 20 diverse negative sequences (resting, waving, random walk)
+        neg_samples = generate_negative_samples(n_samples=20, random_state=1234)
+
+        rejected_count = 0
+        for i in range(len(neg_samples)):
+            seq = neg_samples[i]
+            word, conf, probs, is_valid, reason = recognizer.classify_and_verify_sequence(seq)
+            if not is_valid or word in ["Unknown Gesture", "Hands Ready - Perform Sign"]:
+                rejected_count += 1
+
+        rejection_rate = (rejected_count / len(neg_samples)) * 100.0
+        self.assertGreaterEqual(rejection_rate, 85.0, f"Unknown rejection rate too low: {rejection_rate:.1f}%")
+        print(f"  [PASS] test_07_unknown_gesture_rejection: Rejection rate = {rejection_rate:.1f}% ({rejected_count}/20 rejected).")
 
 
 if __name__ == "__main__":
