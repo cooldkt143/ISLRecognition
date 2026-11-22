@@ -442,53 +442,6 @@ python realtime/predict_video.py --video_path "ISL_Emergency_Sign_dataset/accide
 
 ---
 
-## 🎓 Project Defense / Viva / Explanation Guide
-
-This section is designed to help you explain the project during presentations, viva voce examinations, or project defenses:
-
-### Q1: Why use 3D hand landmarks instead of feeding raw RGB video frames into a 3D CNN or Vision Transformer?
-> **Answer**: 
-> 1. **Computational Efficiency**: A raw video clip of $30 \text{ frames} \times 224 \times 224 \times 3$ consists of over 4.5 million floats, requiring heavy GPU hardware. Landmarks reduce each frame to just 126 coordinates ($2 \times 21 \times 3$), allowing the model to run on lightweight CPUs at 26+ FPS (37 ms latency).
-> 2. **Invariance to Skin Tone, Clothing, and Background**: RGB-based models often overfit to background decor, lighting conditions, or skin pigmentation. Landmark extraction isolates pure kinematic motion geometry, ensuring ethical fairness and robust generalization.
-> 3. **Privacy Preservation**: Processing coordinate vectors rather than streaming raw faces and room environments guarantees user privacy in healthcare and domestic settings.
-
----
-
-### Q2: Why choose a Bidirectional LSTM (BiLSTM) with Dual Pooling instead of a unidirectional LSTM or simple GRU?
-> **Answer**:
-> 1. **Temporal Context**: Sign language signs are defined not just by how they end, but by the relation between the onset, peak stroke, and retraction. Unidirectional LSTMs only understand past frames; BiLSTMs process past and future frames simultaneously.
-> 2. **Dual Temporal Pooling**: Standard LSTMs typically take the last timestep $h_T$. However, signs reach their semantic peak in the middle of the gesture. Concatenating Global Average Pooling (average energy) with Global Max Pooling (peak kinematic stroke) captures both the overall sign trajectory and the key gesture apex.
-
----
-
-### Q3: How did you solve the problem where the model failed for left-handed signers?
-> **Answer**:
-> Hand landmark extractors place the left hand in features 0–62 and the right hand in 63–125. Because training videos were performed right-handedly, the baseline model learned spatial positional dependency rather than sign structure. 
-> We proved this by testing the baseline model on mirrored data, where it scored **0.0% accuracy** on 6 of 8 classes. We resolved this through **Sagittal Reflection Invariance ($\mathcal{S}$)**: by mathematically reflecting the X-axis ($x \to -x$) and swapping left and right hand feature slots, we augmented the training dataset with true bilateral sign geometry. This elevated left-handed accuracy from **0.0% to 97.54%** across all classes.
-
----
-
-### Q4: How does the system reject unfamiliar or random hand movements (Open-Set Rejection)?
-> **Answer**:
-> In standard machine learning, Softmax forces all outputs to sum to 1.0, meaning an unfamiliar gesture will still be classified into one of the 8 classes with artificial confidence. We implemented a 6-tier rejection pipeline:
-> 1. **Kinematic Velocity Gating**: Ignores static resting hands.
-> 2. **Trained Negative Class (`unknown`)**: Synthetic non-sign movements teach the model what non-emergency gestures look like.
-> 3. **Softmax Confidence Threshold**: Requires $P \ge 0.70$.
-> 4. **Margin Threshold**: Requires $P_{(1)} - P_{(2)} \ge 0.25$ to reject ambiguous, half-performed gestures.
-> 5. **Latent Prototype Distance Gating**: Computes the Euclidean distance of the layer `dense_64` feature embedding against known class centroids. If the distance exceeds the empirical 95th percentile radius, it is flagged as Out-of-Distribution (OOD).
-> 6. **Temporal Consensus**: Requires at least 3 of 5 consecutive frames to agree.
-> In our empirical tests on 120 random/conversational gestures, this rejected **100.0%** of non-emergency actions without producing a single false alarm.
-
----
-
-### Q5: Why is the webcam display mirrored while landmark extraction runs on the unmirrored raw camera frame?
-> **Answer**:
-> When a user looks at a screen, they expect a mirror reflection (moving their right hand moves the hand on the right side of the screen). If the video is unmirrored, it feels unnatural and disorienting.
-> However, if we horizontally flip the frame *before* passing it to MediaPipe, the user's right hand would be classified as "Left Hand", completely corrupting the feature indices. 
-> To solve this, we extract landmarks from the **unflipped camera frame** (preserving mathematically pristine anatomical labels), and then horizontally flip the video feed strictly for user display while remapping skeletal landmark coordinates with $x_{screen} = (1 - x) \cdot \text{width}$.
-
----
-
 ## 📜 Citations & References
 
 1. **Foundational Baseline**: 
